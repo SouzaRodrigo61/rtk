@@ -335,7 +335,7 @@ fn is_blob_show_arg(arg: &str) -> bool {
     !arg.starts_with('-') && arg.contains(':')
 }
 
-pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
+pub fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut result = Vec::new();
     let mut current_file = String::new();
     let mut added = 0;
@@ -573,7 +573,7 @@ fn parse_user_limit(args: &[String]) -> Option<usize> {
 /// so we skip line capping (git already returns exactly N commits) and use a
 /// wider truncation threshold (120 chars) to preserve commit context that LLMs
 /// need for rebase/squash operations.
-pub(crate) fn filter_log_output(
+pub fn filter_log_output(
     output: &str,
     limit: usize,
     user_set_limit: bool,
@@ -649,7 +649,7 @@ fn truncate_line(line: &str, width: usize) -> String {
     }
 }
 
-pub(crate) fn format_status_output(porcelain: &str) -> String {
+pub fn format_status_output(porcelain: &str) -> String {
     format_status_inner(porcelain, None)
 }
 

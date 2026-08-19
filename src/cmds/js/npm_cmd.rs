@@ -133,7 +133,7 @@ fn run_filtered(name: &str, args: &[String], verbose: u8, skip_env: bool) -> Res
 }
 
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN
-fn filter_npm_output(output: &str) -> String {
+pub fn filter_npm_output(output: &str) -> String {
     let mut result = Vec::new();
 
     for line in output.lines() {
