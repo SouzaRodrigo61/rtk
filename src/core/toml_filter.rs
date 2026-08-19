@@ -397,6 +397,89 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
 
 static REGISTRY: LazyLock<TomlFilterRegistry> = LazyLock::new(TomlFilterRegistry::load);
 
+/// Build-time index of the builtin match_command patterns -- literal first
+/// words plus the few complex patterns that don't reduce to one. Generated
+/// by build.rs; see the comment there (issue #2).
+mod builtin_match_index {
+    include!(concat!(env!("OUT_DIR"), "/builtin_match_index.rs"));
+}
+
+static COMPLEX_MATCH_SET: LazyLock<RegexSet> = LazyLock::new(|| {
+    RegexSet::new(builtin_match_index::BUILTIN_COMPLEX_PATTERNS)
+        .unwrap_or_else(|_| RegexSet::new::<_, &str>([]).expect("empty RegexSet is valid"))
+});
+
+/// Runtime mirror of build.rs's `leading_literal_word` (they must agree;
+/// the consistency test below pins the builtin side). `^make\b` -> "make";
+/// None when the char after the word could extend the match.
+fn leading_literal_word(pat: &str) -> Option<&str> {
+    let rest = pat.strip_prefix('^')?;
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    let tail = &rest[end..];
+    if tail.is_empty() || tail.starts_with("\\b") || tail.starts_with("\\s") || tail.starts_with("(\\s|$)") {
+        Some(&rest[..end])
+    } else {
+        None
+    }
+}
+
+/// Cheap proof that NO filter (builtin or user) can match `lookup_cmd`,
+/// without loading the full registry. The common case for unrecognized
+/// commands (which is exactly when run_fallback runs): one slice lookup
+/// for the builtin literal first words, one small RegexSet over the
+/// handful of complex builtin patterns, and -- only when user filter
+/// files exist on disk -- a read+parse of those files (they're tiny; the
+/// `rtk init` template is ~440 bytes with zero filters), checking their
+/// match_commands the same way. Trust status is deliberately NOT checked
+/// here: an untrusted file's patterns can only make this return "might
+/// match" (slower, falls to the full registry which ignores untrusted
+/// files properly), never "can't match" for something the registry would
+/// load. False negatives only cost the old slow path; false positives
+/// are impossible unless the build-time index disagrees with the real
+/// compiled patterns, which the test below pins.
+pub fn no_filter_can_match(lookup_cmd: &str) -> bool {
+    let first = lookup_cmd.split_whitespace().next().unwrap_or("");
+    for path in crate::hooks::trust::gated_filter_paths() {
+        if !path.exists() {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        // Parse errors yield an empty pattern list -- safe: the registry's
+        // own loader would reject the same file with a warning and load
+        // nothing from it either.
+        for pat in match_patterns_in(&content) {
+            match leading_literal_word(&pat) {
+                Some(w) => {
+                    if w == first {
+                        return false;
+                    }
+                }
+                None => match Regex::new(&pat) {
+                    Ok(re) => {
+                        if re.is_match(lookup_cmd) {
+                            return false;
+                        }
+                    }
+                    // Invalid regex: compile_filter would skip this filter
+                    // with a warning during the real load too.
+                    Err(_) => {}
+                },
+            }
+        }
+    }
+    if builtin_match_index::BUILTIN_LITERAL_FIRST_WORDS.contains(&first) {
+        return false;
+    }
+    !COMPLEX_MATCH_SET.is_match(lookup_cmd)
+}
+
 pub fn toml_disabled() -> bool {
     std::env::var("RTK_NO_TOML").ok().as_deref() == Some("1")
 }
@@ -826,6 +909,56 @@ mod tests {
                 find_matching_filter(cmd).is_some(),
                 "match-set disagreed with registry for {cmd:?}"
             );
+        }
+    }
+
+    /// The fast-path quick-reject must never disagree with the real
+    /// registry in the dangerous direction: if it claims "no filter can
+    /// match", the registry must indeed find nothing. Covers the literal
+    /// first-word cases, every complex-pattern family the build-time
+    /// extractor refuses to reduce (alternations, unanchored, partial
+    /// literals like `^g(cc|\+\+)`), and genuinely unknown commands.
+    /// User filter files on the running machine are handled inline by the
+    /// shortcut (parsed per call), so this runs everywhere.
+    #[test]
+    fn no_filter_can_match_never_rejects_a_command_the_registry_matches() {
+        for cmd in [
+            "make verify",
+            "jq .",
+            "gcc main.c",
+            "g++ x.cpp",
+            "gradle build",
+            "./gradlew build",
+            "liquibase update",
+            "/usr/local/bin/liquibase update",
+            "nx build",
+            "pnpm nx build",
+            "codemode run x.rhai --workdir .",
+            "true",
+            "frobnicate xyz",
+        ] {
+            if no_filter_can_match(cmd) {
+                assert!(
+                    find_matching_filter(cmd).is_none(),
+                    "quick-reject wrongly dismissed {cmd:?}, which the registry matches"
+                );
+            }
+        }
+        // And the structural pin: every builtin pattern is represented in
+        // the build-time index, either as a literal first word or verbatim
+        // in the complex list -- so a new filter file can't silently fall
+        // outside the fast path's knowledge.
+        for pattern in match_patterns_in(BUILTIN_TOML) {
+            let represented = builtin_match_index::BUILTIN_COMPLEX_PATTERNS.contains(&pattern.as_str())
+                || pattern.strip_prefix('^').is_some_and(|rest| {
+                    let word: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                        .collect();
+                    !word.is_empty()
+                        && builtin_match_index::BUILTIN_LITERAL_FIRST_WORDS.contains(&word.as_str())
+                });
+            assert!(represented, "pattern {pattern:?} missing from build-time index");
         }
     }
 

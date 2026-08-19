@@ -1316,7 +1316,14 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let toml_match = if core::toml_filter::toml_disabled() {
+    // Fast path (issue #2): prove no filter can match via the build-time
+    // first-word index before paying the full registry load (trust checks +
+    // TOML parse + 63 filters' regex compiles, ~9ms measured) -- which used
+    // to run on EVERY unrecognized command, i.e. exactly the commands that
+    // match nothing.
+    let toml_match = if core::toml_filter::toml_disabled()
+        || core::toml_filter::no_filter_can_match(&lookup_cmd)
+    {
         None
     } else {
         core::toml_filter::find_matching_filter(&lookup_cmd)
@@ -1383,13 +1390,14 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                     core::runner::emit_guarded(&filtered, hint.as_deref(), &combined_raw)
                 };
 
-                timer.track(
+                timer.track_and_parse_failure(
                     &raw_command,
                     &format!("rtk:toml {}", raw_command),
                     &combined_raw,
                     &shown,
+                    &error_message,
+                    true,
                 );
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
 
                 Ok(exit_code)
             }
@@ -1411,9 +1419,12 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
         match status {
             Ok(s) => {
-                timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
-
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+                timer.track_passthrough_and_parse_failure(
+                    &raw_command,
+                    &format!("rtk fallback: {}", raw_command),
+                    &error_message,
+                    true,
+                );
 
                 Ok(core::utils::exit_code_from_status(&s, &raw_command))
             }

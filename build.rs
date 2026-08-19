@@ -63,4 +63,58 @@ fn main() {
     }
 
     fs::write(&dest, combined).expect("Failed to write combined builtin_filters.toml");
+
+    // Build-time first-word index of every builtin match_command pattern, so
+    // run_fallback can prove "no filter can possibly match this command"
+    // without loading and compiling the full 63-filter registry (issue #2:
+    // that load ran on EVERY unrecognized command, ~9ms of trust checks +
+    // TOML parse + regex compiles per process, all for commands that match
+    // nothing). Patterns of the shape `^word\b` / `^word\s...` / `^word(\s|$)`
+    // reduce to a literal first word compared for free at runtime; anything
+    // else (alternations, unanchored patterns) goes into a small "complex"
+    // list the runtime checks with one lazily-built RegexSet.
+    let mut literal_words: Vec<String> = Vec::new();
+    let mut complex_patterns: Vec<String> = Vec::new();
+    if let Some(filters) = parsed.get("filters").and_then(|f| f.as_table()) {
+        for (name, def) in filters {
+            let pat = def
+                .get("match_command")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("filter '{}' has no match_command string", name));
+            match leading_literal_word(pat) {
+                Some(w) => literal_words.push(w),
+                None => complex_patterns.push(pat.to_string()),
+            }
+        }
+    }
+    literal_words.sort();
+    literal_words.dedup();
+    let index = format!(
+        "pub const BUILTIN_LITERAL_FIRST_WORDS: &[&str] = &{:?};\npub const BUILTIN_COMPLEX_PATTERNS: &[&str] = &{:?};\n",
+        literal_words, complex_patterns
+    );
+    fs::write(Path::new(&out_dir).join("builtin_match_index.rs"), index)
+        .expect("Failed to write builtin_match_index.rs");
+}
+
+/// The leading literal word of an anchored pattern, if extracting one is
+/// provably safe for first-word rejection. `^make\b` -> "make"; returns
+/// None for anything where the char after the word could extend the match
+/// (e.g. `^g(cc|\+\+)\b`, where the real commands are gcc/g++, not "g") --
+/// those patterns fall into the complex list and are matched properly.
+fn leading_literal_word(pat: &str) -> Option<String> {
+    let rest = pat.strip_prefix('^')?;
+    let word: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if word.is_empty() {
+        return None;
+    }
+    let tail = &rest[word.len()..];
+    if tail.is_empty() || tail.starts_with("\\b") || tail.starts_with("\\s") || tail.starts_with("(\\s|$)") {
+        Some(word)
+    } else {
+        None
+    }
 }

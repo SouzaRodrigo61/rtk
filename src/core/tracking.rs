@@ -1405,6 +1405,54 @@ impl TimedExecution {
         }
     }
 
+    /// Fallback-path combo: passthrough timing + parse-failure learning in
+    /// ONE tracker open. run_fallback used to call `track_passthrough` and
+    /// then `record_parse_failure_silent`, each constructing its own
+    /// `Tracker::new()` -- two separate SQLite opens (private-file checks,
+    /// WAL setup) plus two inserts on every single unrecognized command,
+    /// on a path whose entire job is to add as little overhead as possible
+    /// over just running the command raw (issue #2).
+    pub fn track_passthrough_and_parse_failure(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        error_message: &str,
+        succeeded: bool,
+    ) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        if let Ok(tracker) = Tracker::new() {
+            let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
+            let _ = tracker.record_parse_failure(original_cmd, error_message, succeeded);
+        }
+    }
+
+    /// Same single-open combo for the TOML-filtered fallback path (tokens
+    /// counted, then the parse failure recorded on the same connection).
+    #[allow(clippy::too_many_arguments)]
+    pub fn track_and_parse_failure(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input: &str,
+        output: &str,
+        error_message: &str,
+        succeeded: bool,
+    ) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        let input_tokens = estimate_tokens(input);
+        let output_tokens = estimate_tokens(output);
+        if let Ok(tracker) = Tracker::new() {
+            let _ = tracker.record(
+                original_cmd,
+                rtk_cmd,
+                input_tokens,
+                output_tokens,
+                elapsed_ms,
+            );
+            let _ = tracker.record_parse_failure(original_cmd, error_message, succeeded);
+        }
+    }
+
     /// Track passthrough commands (timing-only, no token counting).
     ///
     /// For commands that stream output or run interactively where output
